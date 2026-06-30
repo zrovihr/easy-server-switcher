@@ -1,0 +1,10 @@
+# Claude Code local files
+.claude/
+
+# Build output
+dist/
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+*.swp
