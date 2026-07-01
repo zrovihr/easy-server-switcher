@@ -1,4 +1,7 @@
-# Dev Notes — Easy Server Changer
+# Dev Notes — Easy Server Switcher
+
+> Renamed from **Easy Server Changer** on 2026-07-01 (mod id `easy_server_changer` → `easy_server_switcher`,
+> folder + files + `get_mod` id + `.mod` + display name). Pre-upload rename, so no user settings to migrate.
 
 Mod-specific source map and decisions. Reusable Darktide/DMF API facts (region service,
 mission board, matchmaking, widget injection, keep-view-open) live in the shared
@@ -10,11 +13,11 @@ after PLAY so the on-board button stays reachable while queued.
 
 ## Files
 ```
-easy_server_changer.mod
-scripts/mods/easy_server_changer/
-  easy_server_changer.lua              -- main: region cycle, requeue, button injection, hooks
-  easy_server_changer_data.lua         -- DMF options (checkboxes, numeric offsets, keybind)
-  easy_server_changer_localization.lua -- labels + tooltips + runtime strings
+easy_server_switcher.mod
+scripts/mods/easy_server_switcher/
+  easy_server_switcher.lua              -- main: region cycle, requeue, button injection, hooks
+  easy_server_switcher_data.lua         -- DMF options (checkboxes, numeric offsets, keybind)
+  easy_server_switcher_localization.lua -- labels + tooltips + runtime strings
 ```
 
 UI is a **3-widget stepper**: `«` (prev) · current-server label · `»` (next), placed just above
@@ -22,7 +25,7 @@ PLAY (centred on the `play_button` node). The **centre label is also a button**:
 a **scrollable dropdown** of every region + ping, which opens downward over PLAY and is clamped to
 the frame (virtualized rows, mouse-wheel scroll, opaque backdrop, PLAY suppressed while open).
 
-## Source map — easy_server_changer.lua
+## Source map — easy_server_switcher.lua
 | Area | Function | Notes |
 |------|----------|-------|
 | Region list (ping-sorted) | `ordered_regions(view)` | `view._mission_board_logic:get_region_latencies()` → table KEYED by region id → `{min_latency,max_latency}`; sort asc by `min_latency` |
@@ -39,8 +42,8 @@ the frame (virtualized rows, mouse-wheel scroll, opaque backdrop, PLAY suppresse
 | Hooks | bottom of file | `on_enter`(build) · `on_exit`(drop refs) · `update`(label sync + dropdown wheel-scroll + deferred close) · `_callback_start_selected_mission`(**suppress PLAY while dropdown open** + keep board open) · `UIManager.close_view`(swallow when flagged) · `next/prev_server_keybind` · `on_setting_changed`(live reposition/rebuild, closes dropdown) |
 
 ## Dev workflow (this mod)
-- Edit here; deploy to `<game>\mods\easy_server_changer\` (folder MUST be `easy_server_changer`
-  — the `.mod` `mod_script` paths are prefixed with it). Add `easy_server_changer` below `dmf`
+- Edit here; deploy to `<game>\mods\easy_server_switcher\` (folder MUST be `easy_server_switcher`
+  — the `.mod` `mod_script` paths are prefixed with it). Add `easy_server_switcher` below `dmf`
   in `mod_load_order.txt`, or install a zip via Vortex. Restart game (no hot reload).
 
 ---
@@ -143,7 +146,7 @@ below and stays in-frame; and "change the defaults like my setting".
 - **Defaults set to Zan's dialled-in values** (`nudge_y -15→-9`, `button_scale 100→72`). NO rename
   this time — his saved values already equal the new defaults, so we WANT them preserved; the
   change only affects fresh installs. (`nudge_x`/`arrow_pad` already matched.)
-- **Packaged a dist** (`dist/easy_server_changer-1.0.0.zip`): top-level `easy_server_changer/`
+- **Packaged a dist** (`dist/easy_server_switcher-1.0.0.zip`): top-level `easy_server_switcher/`
   folder (matches the `.mod` path prefix) with `.mod` + `scripts/` + an updated user-facing
   `README.md`; excludes `DEV_NOTES.md` and `.claude/`. Rewrote the README (was still describing
   the old single `» SERVER` cycle button + `-300/0` offsets → now stepper + dropdown + new options).
@@ -160,3 +163,16 @@ below and stays in-frame; and "change the defaults like my setting".
   Row-click close was already deferred (`close_requested`). All `view._widgets` add/remove now
   happens from `update`/`on_setting_changed`, never a draw-time hotspot callback. (Now a shared
   DEV_REFERENCE gotcha.)
+
+### 2026-07-01 (cont. 4) — dropdown wheel-scroll never fired (Vector3 vs table)
+- **Symptom (user screenshot):** dropdown showed 5 rows ending at "Europe … **+5**" — the `+N`
+  hint proved all 10 regions were in the list and 5 more sat below, but the wheel wouldn't move it.
+  So NOT a short list and NOT the frame-clamp (both correct) — the scroll read itself was dead.
+- **Cause:** `input_service:get("scroll_axis")` returns a **`Vector3` (userdata)**, not a Lua table
+  (`input_service.lua:15` → `Vector3(0,0,0)`; every stock view reads `scroll_axis[2]` directly).
+  The wheel handler guarded with `if ok and type(axis) == "table"` — `type(Vector3)` is `"userdata"`,
+  so that branch was **never** taken and every wheel delta was discarded.
+- **Fix:** read `axis[2]` directly inside the pcall and drop the `type()` guard —
+  `local ok, v = pcall(function() local axis = input and input:get("scroll_axis"); return (axis and axis[2]) or 0 end)`
+  then act on `v ~= 0`. Kept the accumulator + `is_hover` gate. (Now a shared DEV_REFERENCE gotcha:
+  axis aliases are Vector3, never `type()`-check them.) Deployed + dist rebuilt (v1.0.0, 14.3 KB).

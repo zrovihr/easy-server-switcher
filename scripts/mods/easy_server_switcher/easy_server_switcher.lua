@@ -1,6 +1,6 @@
 --[[
-	Easy Server Changer
-	-------------------
+	Easy Server Switcher
+	--------------------
 	Adds a server stepper to the mission board:  «  Hong Kong 56ms  »
 	sitting just above the difficulty selector, next to PLAY.
 
@@ -15,7 +15,7 @@
 	do nothing, never crash the mission board.
 ]]
 
-local mod = get_mod("easy_server_changer")
+local mod = get_mod("easy_server_switcher")
 
 local VIEW_NAME = "mission_board_view"
 
@@ -693,21 +693,22 @@ mod:hook_safe("MissionBoardView", "update", function(self)
 			end
 			if hovering then
 				local input = self._stored_input_service   -- set by the view every draw
-				local ok, axis = pcall(function()
-					return input and input:get("scroll_axis")
+				-- scroll_axis comes back as a Vector3 (USERDATA), not a Lua table — every game
+				-- view reads scroll_axis[2] directly. A `type(axis) == "table"` guard here is
+				-- ALWAYS false and silently eats every scroll. Index [2] inside the pcall instead.
+				local ok, v = pcall(function()
+					local axis = input and input:get("scroll_axis")
+					return (axis and axis[2]) or 0
 				end)
-				if ok and type(axis) == "table" then
-					local v = axis[2] or 0
-					if v ~= 0 then
-						dd.scroll_accum = (dd.scroll_accum or 0) + v
-						while dd.scroll_accum >= 1 do
-							dd.scroll_accum = dd.scroll_accum - 1
-							scroll_dropdown(self, -1)
-						end
-						while dd.scroll_accum <= -1 do
-							dd.scroll_accum = dd.scroll_accum + 1
-							scroll_dropdown(self, 1)
-						end
+				if ok and v ~= 0 then
+					dd.scroll_accum = (dd.scroll_accum or 0) + v
+					while dd.scroll_accum >= 1 do
+						dd.scroll_accum = dd.scroll_accum - 1
+						scroll_dropdown(self, -1)
+					end
+					while dd.scroll_accum <= -1 do
+						dd.scroll_accum = dd.scroll_accum + 1
+						scroll_dropdown(self, 1)
 					end
 				end
 			end

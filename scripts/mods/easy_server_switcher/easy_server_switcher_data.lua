@@ -1,4 +1,4 @@
-local mod = get_mod("easy_server_changer")
+local mod = get_mod("easy_server_switcher")
 
 return {
 	name        = mod:localize("mod_name"),

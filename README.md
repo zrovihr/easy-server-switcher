@@ -1,8 +1,8 @@
-# Easy Server Changer
+# Easy Server Switcher
 
 A Warhammer 40,000: Darktide mod (Darktide Mod Framework) that adds a small
-**server stepper** next to **PLAY** on the mission board, so you can chase a populated
-region without the stop / play / change / play grind.
+**server switcher** next to **PLAY** on the mission board, so you can chase a populated
+region without the stop / play / switch / play grind.
 
 ## What it does
 
@@ -39,12 +39,12 @@ only persists it. Neither cycles + re-queues.
    **Manual:** extract so you end up with:
 
    ```
-   <game>/mods/easy_server_changer/easy_server_changer.mod
-   <game>/mods/easy_server_changer/scripts/mods/easy_server_changer/...
+   <game>/mods/easy_server_switcher/easy_server_switcher.mod
+   <game>/mods/easy_server_switcher/scripts/mods/easy_server_switcher/...
    ```
 
-   (the folder in `mods/` must be named `easy_server_changer`), then add
-   `easy_server_changer` to `<game>/mods/mod_load_order.txt`, **below** `dmf`.
+   (the folder in `mods/` must be named `easy_server_switcher`), then add
+   `easy_server_switcher` to `<game>/mods/mod_load_order.txt`, **below** `dmf`.
 3. Launch with mods enabled.
 
 ## Options (Mod Settings menu)

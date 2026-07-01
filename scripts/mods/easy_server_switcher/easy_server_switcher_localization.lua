@@ -1,9 +1,9 @@
 return {
 	mod_name = {
-		en = "Easy Server Changer",
+		en = "Easy Server Switcher",
 	},
 	mod_description = {
-		en = "Adds a one-press SERVER button next to PLAY on the mission board that cycles your matchmaking region (sorted by ping). If you are already in a queue, it cancels and instantly re-queues on the next region so you never have to stop / play / change / play again.",
+		en = "Adds a server switcher next to PLAY on the mission board: step through your matchmaking region (sorted by ping) with the arrows, or click the label for a scrollable list of every region. If you are already in a queue, it cancels and instantly re-queues on the new region so you never have to stop / play / switch / play again.",
 	},
 
 	-- Option titles (DMF shows the raw <setting_id> when a setting has no matching
