@@ -30,6 +30,104 @@ end
 local suppress_close_view = nil
 
 -- ---------------------------------------------------------------------------
+-- approx. local time per region (so you can eyeball how many players are awake)
+--
+-- Keyed by the game's STABLE region id (scripts/settings/backend/region_localization.lua),
+-- NOT the localized display name — the id survives translation and re-skinning; the name
+-- doesn't. The clock is the only thing we add; the region NAME still comes from the game.
+--
+-- A region covers many timezones, so each `off` is a REPRESENTATIVE city (a judgement call),
+-- in minutes east of UTC. `dst` names which DST rule (if any) shifts it +60 in season.
+-- All os.* calls are pcall-wrapped downstream, so a bad/absent clock just hides the time.
+-- ---------------------------------------------------------------------------
+local REGION_TZ = {
+	["eu"]         = { off =   60, dst = "eu" },   -- Central Europe (Berlin/Paris)
+	["us-east"]    = { off = -300, dst = "us" },   -- US Eastern (New York)
+	["us-west"]    = { off = -480, dst = "us" },   -- US Pacific (Los Angeles)
+	["sa"]         = { off = -180 },               -- South America (São Paulo) — no DST
+	["hk"]         = { off =  480 },               -- Hong Kong — no DST
+	["mei"]        = { off =  180 },               -- Middle East (Riyadh/Bahrain) — no DST
+	["afr-south"]  = { off =  120 },               -- Southern Africa (Johannesburg) — no DST
+	["ap-central"] = { off =  330 },               -- Central & Southern Asia (India) — no DST
+	["ap-north"]   = { off =  540 },               -- Eastern Asia (Tokyo/Seoul) — no DST
+	["ap-south"]   = { off =  600, dst = "au" },   -- Oceania (Sydney)
+}
+
+-- weekday of a Y/M/D (1=Sun..7=Sat, matching os.date's wday). Noon avoids any DST-gap hour;
+-- the local->epoch->local round-trip keeps wday aligned to the input date.
+local function weekday(y, m, d)
+	local ok, wd = pcall(function()
+		return os.date("*t", os.time({ year = y, month = m, day = d, hour = 12 })).wday
+	end)
+	return ok and wd or nil
+end
+
+-- day-of-month of the nth Sunday (n>=1) or, if n<0, the LAST Sunday, in month m of year y.
+local function sunday(y, m, n)
+	if n < 0 then
+		for d = 31, 25, -1 do
+			if weekday(y, m, d) == 1 then return d end
+		end
+	else
+		local count = 0
+		for d = 1, 31 do
+			if weekday(y, m, d) == 1 then
+				count = count + 1
+				if count == n then return d end
+			end
+		end
+	end
+	return nil
+end
+
+-- Is DST active on this UTC date? Day-granularity only: we flip at the boundary DAY, not the
+-- exact 01:00/02:00 switch hour. For an "are they roughly awake" clock that's plenty — worst
+-- case it reads one hour off for part of one day, twice a year.
+local function dst_active(rule, y, m, d)
+	if rule == "eu" then
+		-- last Sun Mar .. last Sun Oct
+		if m < 3 or m > 10 then return false end
+		if m > 3 and m < 10 then return true end
+		if m == 3 then return d >= (sunday(y, 3, -1) or 31) end
+		return d < (sunday(y, 10, -1) or 25)          -- m == 10
+	elseif rule == "us" then
+		-- 2nd Sun Mar .. 1st Sun Nov
+		if m < 3 or m > 11 then return false end
+		if m > 3 and m < 11 then return true end
+		if m == 3 then return d >= (sunday(y, 3, 2) or 8) end
+		return d < (sunday(y, 11, 1) or 1)            -- m == 11
+	elseif rule == "au" then
+		-- southern hemisphere: 1st Sun Oct .. 1st Sun Apr (summer straddles the new year)
+		if m > 4 and m < 10 then return false end
+		if m < 4 or m > 10 then return true end
+		if m == 10 then return d >= (sunday(y, 10, 1) or 1) end
+		return d < (sunday(y, 4, 1) or 1)             -- m == 4
+	end
+	return false
+end
+
+-- "21:30" for the region's current local time, or nil if we can't compute it.
+local function region_local_time(region_id)
+	local tz = REGION_TZ[region_id]
+	if not tz then
+		return nil
+	end
+	local ok, s = pcall(function()
+		local u = os.date("!*t")   -- current UTC (game uses the same "!" idiom in date.lua)
+		local off = tz.off
+		if tz.dst and dst_active(tz.dst, u.year, u.month, u.day) then
+			off = off + 60
+		end
+		local total = (u.hour * 60 + u.min + off) % 1440
+		if total < 0 then
+			total = total + 1440
+		end
+		return string.format("%02d:%02d", math.floor(total / 60), total % 60)
+	end)
+	return ok and s or nil
+end
+
+-- ---------------------------------------------------------------------------
 -- helpers
 -- ---------------------------------------------------------------------------
 
@@ -75,8 +173,9 @@ local function ordered_regions(view)
 	return list
 end
 
--- "Hong Kong 56ms"
-local function region_label(name, data)
+-- "Hong Kong 56ms" — with_time appends "  21:30" (region's approx local time) when the
+-- show_region_time option is on. Callers that want just the name pass with_time = false/nil.
+local function region_label(name, data, with_time)
 	if not name or name == "" then
 		return "—"
 	end
@@ -96,6 +195,13 @@ local function region_label(name, data)
 			display = string.format("%s %d-%dms", display, data.min_latency, data.max_latency)
 		else
 			display = string.format("%s %dms", display, data.min_latency)
+		end
+	end
+
+	if with_time then
+		local t = region_local_time(name)
+		if t then
+			display = display .. "  " .. t
 		end
 	end
 
@@ -132,7 +238,9 @@ end
 -- so those upvalues resolve to the real functions once they're assigned below.
 local refresh_dropdown, build_dropdown, close_dropdown, toggle_dropdown, scroll_dropdown
 
--- Update the centre label to the region we're currently set to (only when it changes).
+-- Update the centre label to the region we're currently set to. Refreshes when the region
+-- changes OR (with the clock on) when the minute ticks over, so the persistent on-screen label
+-- keeps a live time instead of freezing at whatever it read when you last switched.
 -- The label shows the region NAME ONLY (pings live in the dropdown) so it stays short enough
 -- to fit on one line at small button scales.
 local function refresh_label(view)
@@ -141,12 +249,25 @@ local function refresh_label(view)
 	end
 
 	local cur = current_region()
-	if cur ~= view._esc_region_cache then
+
+	-- current UTC minute-of-day; drives the once-a-minute clock tick on the label
+	local now_min
+	if mod:get("show_region_time") then
+		local ok, m = pcall(function()
+			local u = os.date("!*t")
+			return u.hour * 60 + u.min
+		end)
+		now_min = ok and m or nil
+	end
+
+	if cur ~= view._esc_region_cache or now_min ~= view._esc_time_min then
 		view._esc_region_cache = cur
+		view._esc_time_min = now_min
 
 		local list = ordered_regions(view)
 		local _, idx = find_entry(list, cur)
-		local label = region_label(cur, nil)   -- name only; pings are shown in the dropdown
+		-- name only (pings live in the dropdown) + optional approx local time
+		local label = region_label(cur, nil, mod:get("show_region_time"))
 
 		local widgets = view._esc_widgets
 		if widgets.label then
@@ -490,7 +611,7 @@ function refresh_dropdown(view)
 		local widget = dd.rows[i]
 		local entry = dd.list[dd.scroll + i]
 		if widget and entry then
-			local text = region_label(entry.name, entry.data)
+			local text = region_label(entry.name, entry.data, mod:get("show_region_time"))
 			-- ASCII "+N" scroll hints on the edge rows (no triangle glyphs — not guaranteed in
 			-- the menu font) so the user knows more regions exist above / below.
 			if i == 1 and dd.scroll > 0 then

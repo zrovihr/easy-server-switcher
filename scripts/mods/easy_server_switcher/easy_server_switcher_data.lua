@@ -30,6 +30,14 @@ return {
 				default_value = true,
 				tooltip       = "auto_requeue_tooltip",
 			},
+			-- Append each region's approximate local time (e.g. "Europe  21:30") to the
+			-- label and dropdown, so you can gauge how many players are likely awake there.
+			{
+				setting_id    = "show_region_time",
+				type          = "checkbox",
+				default_value = true,
+				tooltip       = "show_region_time_tooltip",
+			},
 			-- Where the stepper sits, measured from the centre of the PLAY button.
 			-- Negative X = left, positive X = right. Negative Y = up, positive Y = down.
 			-- Default puts it just above the difficulty selector.

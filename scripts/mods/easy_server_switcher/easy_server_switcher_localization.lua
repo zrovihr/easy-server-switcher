@@ -21,6 +21,9 @@ return {
 	auto_requeue = {
 		en = "Auto re-queue when changing server",
 	},
+	show_region_time = {
+		en = "Show region local time",
+	},
 	nudge_x = {
 		en = "Position X   (0 = centred on PLAY,  - left / + right)",
 	},
@@ -53,6 +56,9 @@ return {
 	},
 	auto_requeue_tooltip = {
 		en = "When you are already in a queue and press SERVER, cancel matchmaking and immediately re-queue on the newly selected region. Turn off to only switch the region without re-queueing.",
+	},
+	show_region_time_tooltip = {
+		en = "Append each region's approximate current local time to the label and the dropdown list, so you can gauge how many players are likely awake there. Times are approximate (one representative city per region) and account for daylight saving in Europe, North America and Australia.",
 	},
 	offset_x_tooltip = {
 		en = "Nudge the stepper left/right from its centred-on-PLAY position. 0 = centred. Negative = left, positive = right.",

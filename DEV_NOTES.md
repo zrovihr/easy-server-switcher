@@ -29,7 +29,8 @@ the frame (virtualized rows, mouse-wheel scroll, opaque backdrop, PLAY suppresse
 | Area | Function | Notes |
 |------|----------|-------|
 | Region list (ping-sorted) | `ordered_regions(view)` | `view._mission_board_logic:get_region_latencies()` → table KEYED by region id → `{min_latency,max_latency}`; sort asc by `min_latency` |
-| Display name | `region_label(name,data)` | `region_localization` map + `Localize` + ` %dms`/` %d-%dms` |
+| Display name | `region_label(name,data,with_time)` | `region_localization` map + `Localize` + ` %dms`/` %d-%dms`; `with_time` appends `  HH:MM` from `region_local_time(id)` when `show_region_time` on |
+| Region local time | `region_local_time(id)` / `REGION_TZ` / `dst_active` | id→representative UTC offset (+DST); `os.date("!*t")`; pcall-wrapped |
 | Current region | `current_region()` | `region_latency:get_prefered_mission_region()` |
 | Set region (+requeue) | `apply_region(view, entry)` | shared core: `set_prefered_mission_region` → refresh label → if `is_in_matchmaking`+`auto_requeue` → `cancel_matchmaking():next(start)` |
 | Arrows | `mod.step_server(view, dir)` | `dir` -1/+1, **clamps at ends** (no wrap) → `apply_region` |
@@ -176,3 +177,25 @@ below and stays in-frame; and "change the defaults like my setting".
   `local ok, v = pcall(function() local axis = input and input:get("scroll_axis"); return (axis and axis[2]) or 0 end)`
   then act on `v ~= 0`. Kept the accumulator + `is_hover` gate. (Now a shared DEV_REFERENCE gotcha:
   axis aliases are Vector3, never `type()`-check them.) Deployed + dist rebuilt (v1.0.0, 14.3 KB).
+
+### 2026-07-04 session — approx. region local time (user feedback: gauge who's awake)
+- **Feature:** append each region's approximate local time (e.g. `Europe  21:30`) to the centre
+  label and every dropdown row, so players can eyeball how populated a region likely is.
+  Optional via new `show_region_time` checkbox, **default ON** (per user).
+- **Impl** (top of `easy_server_switcher.lua`): `REGION_TZ` maps the game's **stable region id**
+  (`region_localization.lua`: `eu, hk, mei, sa, us-east, us-west, afr-south, ap-central, ap-north,
+  ap-south`) → `{off=<min east of UTC>, dst=<"eu"/"us"/"au"/nil>}`. `region_local_time(id)` reads
+  `os.date("!*t")` (UTC — same idiom the game's `foundation/utilities/date.lua` uses; `os.date`/
+  `os.time` both survive `scrub_dangerous_functions.lua`), adds the offset (+60 if `dst_active`),
+  formats `%02d:%02d`. All os.* pcall-wrapped → bad/absent clock just hides the time, never crashes.
+- **DST** is day-granularity (flips on the boundary DAY, not the 01:00/02:00 hour) — fine for an
+  "are they awake" clock. Rules: EU last-Sun-Mar..last-Sun-Oct, US 2nd-Sun-Mar..1st-Sun-Nov,
+  AU (southern) 1st-Sun-Oct..1st-Sun-Apr. `weekday()` via `os.time{…,hour=12}` round-trip.
+- **Label clock ticks:** `refresh_label` now also refreshes when the UTC minute changes
+  (`view._esc_time_min`), so the persistent label clock isn't frozen between region switches.
+  Dropdown refreshes every frame while open (existing highlight-sync), so its clock is live too.
+- **ASSUMPTIONS to confirm in-game** (representative city per region is a judgement call; the three
+  `ap-*` + `mei` are the shaky ones): `ap-central`→India +5:30, `ap-north`→Japan/Korea +9,
+  `ap-south`→Sydney +10 (DST), `mei`→Riyadh/Bahrain +3. Fix = edit the one `REGION_TZ` block.
+- **Deployed** the 3 scripts to the E: install (real copy, not symlink). **NOT yet verified in-game**
+  (can't drive Darktide) and **dist zip NOT rebuilt** — do both once the region times read correct.
