@@ -15,7 +15,7 @@ return {
 			{
 				setting_id    = "debug_logging",
 				type          = "checkbox",
-				default_value = true,
+				default_value = false,
 				tooltip       = "debug_logging_tooltip",
 			},
 			{
