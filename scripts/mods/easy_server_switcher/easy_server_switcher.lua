@@ -17,7 +17,138 @@
 
 local mod = get_mod("easy_server_switcher")
 
-local VIEW_NAME = "mission_board_view"
+-- ---------------------------------------------------------------------------
+-- per-view adapters
+--
+-- The stepper lives in THREE menus now: the mission board, the Havoc play view, and the
+-- Party Finder (group finder). The region service (Managers.data_service.region_latency) is
+-- IDENTICAL in all of them, so all the geometry/dropdown/label code is generic. Only four things
+-- differ per view — the scenegraph node we anchor to, its width, where the ping-sorted region list
+-- comes from, and which callback starts matchmaking — so those live here, keyed by the view's
+-- `view_name` (BaseView sets self.view_name; base_view.lua:41).
+-- ---------------------------------------------------------------------------
+local ADAPTERS = {
+	["mission_board_view"] = {
+		class     = "MissionBoardView",
+		anchor    = "play_button",                       -- scenegraph node we hang the stepper on
+		play_w    = 375,                                 -- ...and its width (mission_board_view_settings.lua)
+		-- per-view nudge ADDED on top of the user's nudge_x/nudge_y (so one global fine-tune still works,
+		-- but each menu starts in the right spot). Board was already dialled in via the user's saved
+		-- nudge, so its base stays 0. Havoc/PF anchor to different-height buttons and needed raising.
+		base_x    = 0,
+		base_y    = 0,
+		-- board's synchronous region list: view._mission_board_logic:get_region_latencies()
+		latencies = function(view)
+			local logic = view and view._mission_board_logic
+			return logic and logic.get_region_latencies and logic:get_region_latencies()
+		end,
+		-- stock PLAY callback (mission/quickplay branch); close is suppressed around it
+		start     = function(view)
+			return view and view._callback_start_selected_mission
+		end,
+	},
+	["havoc_play_view"] = {
+		class     = "HavocPlayView",
+		anchor    = "play_button",
+		play_w    = 347,                                 -- play_button = default_button.size {347,76} (button_pass_templates.lua)
+		base_x    = 0,
+		base_y    = -40,                                 -- raise slightly above Havoc's PLAY (per Zan, in-game) — tune here
+
+		-- Havoc caches its region list on self._regions_latency (fetched async in _setup_regions);
+		-- same shape as the board's — table keyed by region id -> {min_latency, max_latency}.
+		latencies = function(view)
+			return view and view._regions_latency
+		end,
+		-- Havoc's PLAY handler (activates the havoc mission, then queues on the prefered region)
+		start     = function(view)
+			return view and view._cb_on_mission_start
+		end,
+	},
+	["group_finder_view"] = {
+		class     = "GroupFinderView",
+		anchor    = "start_group_button",                -- the "host"/List-Own-Party button (group_finder_view_definitions.lua, 300x40)
+		play_w    = 300,
+		base_x    = 0,
+		base_y    = -80,                                 -- sit just under the BACK button (per Zan, in-game) — tune here
+
+		-- Party Finder does NOT cache the region list on the view (its own fetch_regions() throws the
+		-- result away). So we fetch our own copy once and stash it on view._esc_regions. The service
+		-- caches its backend data, and the PF view already fetched it in on_enter, so this resolves
+		-- fast (nil for a beat, like Havoc). Same shape: region id -> {min_latency, max_latency}.
+		latencies = function(view)
+			if view and view._esc_regions == nil and not view._esc_regions_fetching then
+				view._esc_regions_fetching = true
+				pcall(function()
+					local rls = Managers.data_service and Managers.data_service.region_latency
+					local p  = rls and rls.fetch_regions_latency and rls:fetch_regions_latency()
+					if p and p.next then
+						p:next(function(regions)
+							view._esc_regions = regions or false   -- false = fetched-but-empty, so we don't refetch forever
+						end):catch(function()
+							view._esc_regions = false
+						end)
+					else
+						view._esc_regions = false
+					end
+				end)
+			end
+			return view and view._esc_regions or nil    -- false -> nil ("not loaded"); a real table passes through
+		end,
+		-- Called after the region is switched. Vanilla PF only reads the region when it (re)opens the
+		-- search stream / advertises, so without this the list keeps showing the OLD region's results
+		-- until you poke a filter. While BROWSING we re-run the search (the game reads the region fresh
+		-- in _start_advertisements_stream, so a refresh picks up the new one). While ADVERTISING (host
+		-- mode) re-listing on the new server is the next iteration — not done here.
+		on_region_changed = function(view)
+			pcall(function()
+				local pim = Managers.party_immaterium
+				local advertising = pim and pim.is_party_advertisement_active and pim:is_party_advertisement_active()
+				if not advertising and view._cb_on_refresh_button_pressed then
+					view:_cb_on_refresh_button_pressed()   -- tears down + reopens the stream on the new region
+				end
+			end)
+		end,
+		-- Hide the stepper when the view is showing something our overlay must not cover. In PF that's
+		-- the SHIFT "Show Details" party preview: the left column swaps the filters for the party's
+		-- player list (view._previewed_group_id is set + the tag grid is input-disabled). The native
+		-- filters hide there, so we hide too.
+		hide_when = function(view)
+			return view and view._previewed_group_id ~= nil
+		end,
+		-- No auto re-post while advertising yet (see hooks / DEV_NOTES): switching region while listed
+		-- needs the game's cancel+advertise pipeline + re-anchoring the stepper — the next iteration.
+	},
+}
+
+-- view_names we inject into (used for keybind + on_setting_changed to find whichever is open)
+local SUPPORTED_VIEWS = { "mission_board_view", "havoc_play_view", "group_finder_view" }
+
+-- the adapter for a live view instance, or nil if it's not one we support
+local function adapter_for(view)
+	local vn = view and view.view_name
+	return vn and ADAPTERS[vn] or nil
+end
+
+-- scenegraph node this view's stepper anchors to (defaults to play_button)
+local function anchor_of(view)
+	local adapter = adapter_for(view)
+	return (adapter and adapter.anchor) or "play_button"
+end
+
+-- first supported view that's currently open, or nil
+local function active_supported_view()
+	local ui = Managers.ui
+	if not ui or not ui.view_instance then
+		return nil
+	end
+	for i = 1, #SUPPORTED_VIEWS do
+		local v = ui:view_instance(SUPPORTED_VIEWS[i])
+		if v then
+			return v
+		end
+	end
+	return nil
+end
 
 -- gated debug logging (Mod Settings -> Debug logging); shows up in console_logs/*.log
 local function dbg(fmt, ...)
@@ -144,10 +275,11 @@ local function region_latency_service()
 	return ds and ds.region_latency
 end
 
--- ordered (by ping) list of regions: { {name, data={min_latency,max_latency}}, ... } or nil
+-- ordered (by ping) list of regions: { {name, data={min_latency,max_latency}}, ... } or nil.
+-- Source of the raw latency table is per-view (see ADAPTERS); the shape is the same either way.
 local function ordered_regions(view)
-	local logic = view and view._mission_board_logic
-	local latencies = logic and logic.get_region_latencies and logic:get_region_latencies()
+	local adapter = adapter_for(view)
+	local latencies = adapter and adapter.latencies(view)
 
 	if type(latencies) ~= "table" then
 		return nil
@@ -302,12 +434,14 @@ end
 
 -- Start (or restart) matchmaking on the current selection without closing the board.
 local function start_on_current_selection(view)
-	if not view or not view._callback_start_selected_mission then
+	local adapter = adapter_for(view)
+	local start_fn = adapter and adapter.start and adapter.start(view)
+	if not start_fn then
 		return
 	end
 
-	suppress_close_view = view.view_name or VIEW_NAME
-	local ok, err = pcall(view._callback_start_selected_mission, view)
+	suppress_close_view = view.view_name
+	local ok, err = pcall(start_fn, view)
 	suppress_close_view = nil
 
 	if not ok then
@@ -328,6 +462,13 @@ local function apply_region(view, entry)
 	rls:set_prefered_mission_region(entry.name)
 	refresh_label(view)
 	dbg("apply_region: region set -> '%s'", tostring(entry.name))
+
+	-- per-view side effect: e.g. Party Finder must re-issue its search on the new region, or the UI
+	-- keeps showing the old region's results (the "nothing happens until I poke a filter" bug).
+	local adapter = adapter_for(view)
+	if adapter and adapter.on_region_changed then
+		adapter.on_region_changed(view)
+	end
 
 	local label = region_label(entry.name, entry.data)
 
@@ -401,12 +542,15 @@ end
 local ARROW_W, LABEL_W, H = 48, 240, 52
 -- dropdown row height (base 100%), scaled by button_scale
 local ROW_H = 44
--- play_button scenegraph node size (mission_board_view_settings.lua). Our three widgets all
--- anchor to that node's TOP-LEFT corner and each terminal_button centres its own text inside
--- its box — so to get a real «  label  » we centre the whole group on the node centre (PLAY_W/2)
--- ourselves and lay the boxes out left-to-right. (The old px±gap math anchored every box at the
--- node's left edge, which flung « to the far left and dropped » into the middle of the label.)
-local PLAY_W = 375
+-- play_button scenegraph node WIDTH (per-view — 375 on the board, 347 on Havoc; see ADAPTERS).
+-- Our three widgets all anchor to that node's TOP-LEFT corner and each terminal_button centres
+-- its own text inside its box — so to get a real «  label  » we centre the whole group on the node
+-- centre (play_w/2) ourselves and lay the boxes out left-to-right. (The old px±gap math anchored
+-- every box at the node's left edge, which flung « to the far left and dropped » into the label.)
+local function play_w_of(view)
+	local adapter = adapter_for(view)
+	return (adapter and adapter.play_w) or 375
+end
 
 local function metrics()
 	local scale = math.max(0.25, (mod:get("button_scale") or 100) / 100)
@@ -424,12 +568,16 @@ end
 -- Returns offsets { prev={x,y,z}, label=…, next=… } and the box sizes aw,lw,h.
 -- nudge_x/nudge_y move the (otherwise centred) group; arrow_pad is the gap between each
 -- arrow box and the label box (smaller = arrows hug the label).
-local function compute_layout()
+local function compute_layout(view)
 	local aw, lw, h = metrics()
+	local PLAY_W  = play_w_of(view)
+	local adapter = adapter_for(view)
+	local base_x  = (adapter and adapter.base_x) or 0    -- per-view starting offset (see ADAPTERS)
+	local base_y  = (adapter and adapter.base_y) or 0
 	local pad     = mod:get("arrow_pad") or 6
-	local nudge_x = mod:get("nudge_x") or 0
-	-- centre Y on (node_top + nudge_y): subtract h/2 so it stays put when the size changes
-	local cy      = (mod:get("nudge_y") or -15) - h * 0.5
+	local nudge_x = (mod:get("nudge_x") or 0) + base_x
+	-- centre Y on (node_top + nudge_y + per-view base): subtract h/2 so it stays put when size changes
+	local cy      = (mod:get("nudge_y") or -15) + base_y - h * 0.5
 	local z       = 30
 
 	local group_w    = aw + pad + lw + pad + aw
@@ -473,7 +621,7 @@ end)
 local function play_button_top_y(view)
 	local ok, y = pcall(function()
 		local UIScenegraph = require("scripts/managers/ui/ui_scenegraph")
-		local wp = UIScenegraph.world_position(view._ui_scenegraph, "play_button")
+		local wp = UIScenegraph.world_position(view._ui_scenegraph, anchor_of(view))
 		return wp and wp[2]
 	end)
 	if ok and type(y) == "number" then
@@ -485,10 +633,12 @@ end
 -- Panel geometry for `total` rows: panel_left, panel_w, first-row top-offset (rel. play_button
 -- top-left), row_h, and how many rows fit on-screen (the rest scroll).
 local function dropdown_metrics(view, total)
-	local pos, aw, lw, h = compute_layout()
+	local pos, aw, lw, h = compute_layout(view)
+	local PLAY_W  = play_w_of(view)
+	local adapter = adapter_for(view)
 	local scale   = math.max(0.25, (mod:get("button_scale") or 100) / 100)
 	local pad     = mod:get("arrow_pad") or 6
-	local nudge_x = mod:get("nudge_x") or 0
+	local nudge_x = (mod:get("nudge_x") or 0) + ((adapter and adapter.base_x) or 0)   -- match the stepper's X
 	local row_h   = math.max(18, math.floor(ROW_H * scale))
 	local group_w = aw + pad + lw + pad + aw
 
@@ -556,7 +706,7 @@ function build_dropdown(view)
 		local font = label_font_size()
 
 		-- opaque backdrop (z=78, under the rows)
-		local bg_def = UIWidget.create_definition(DROPDOWN_BACKDROP, "play_button", nil, { panel_w, max_visible * row_h })
+		local bg_def = UIWidget.create_definition(DROPDOWN_BACKDROP, anchor_of(view), nil, { panel_w, max_visible * row_h })
 		local backdrop = view:_create_widget("esc_dd_bg", bg_def)
 		backdrop.offset = { panel_left, top_off, 78 }
 		view._widgets[#view._widgets + 1] = backdrop
@@ -564,7 +714,7 @@ function build_dropdown(view)
 		-- rows (z=80, on top of the backdrop and PLAY)
 		local rows = {}
 		for i = 1, max_visible do
-			local def = UIWidget.create_definition(ButtonPassTemplates.terminal_button, "play_button", nil, { panel_w, row_h })
+			local def = UIWidget.create_definition(ButtonPassTemplates.terminal_button, anchor_of(view), nil, { panel_w, row_h })
 			local widget = view:_create_widget("esc_dd_row_" .. i, def)
 			widget.style.text.font_size = font
 			widget.offset = { panel_left, top_off + (i - 1) * row_h, 80 }
@@ -687,14 +837,14 @@ local function build_stepper(view)
 		local UIWidget = require("scripts/managers/ui/ui_widget")
 		local ButtonPassTemplates = require("scripts/ui/pass_templates/button_pass_templates")
 
-		local pos, aw, lw, h = compute_layout()
+		local pos, aw, lw, h = compute_layout(view)
 
 		-- terminal_button's text pass (default_button_text_change_function) copies
 		-- content.original_text -> content.text EVERY frame. Setting content.text
 		-- alone gets wiped to "" instantly -> invisible text. The text MUST live in
 		-- content.original_text. (This is how the game itself feeds every terminal_button.)
 		local function make(name, w, text, on_press)
-			local def = UIWidget.create_definition(ButtonPassTemplates.terminal_button, "play_button", nil, { w, h })
+			local def = UIWidget.create_definition(ButtonPassTemplates.terminal_button, anchor_of(view), nil, { w, h })
 			local widget = view:_create_widget(name, def)
 			widget.content.original_text = text
 			widget.content.text = text
@@ -739,7 +889,7 @@ local function reposition(view)
 	if not widgets then
 		return
 	end
-	local pos = compute_layout()
+	local pos = compute_layout(view)
 	if widgets.prev  then widgets.prev.offset  = pos.prev;  widgets.prev.dirty = true end
 	if widgets.label then widgets.label.offset = pos.label; widgets.label.dirty = true end
 	if widgets.next  then widgets.next.offset  = pos.next;  widgets.next.dirty = true end
@@ -763,25 +913,59 @@ local function destroy_stepper(view)
 	end
 	view._esc_widgets = nil
 	view._esc_region_cache = nil
+	view._esc_hidden = nil
 end
 
 -- ---------------------------------------------------------------------------
 -- hooks
 -- ---------------------------------------------------------------------------
 
-mod:hook_safe("MissionBoardView", "on_enter", function(self)
+-- both injected views share the exact same lifecycle; only the class name differs.
+local function on_view_enter(self)
 	build_stepper(self)
-end)
+end
 
-mod:hook_safe("MissionBoardView", "on_exit", function(self)
+local function on_view_exit(self)
 	self._esc_widgets = nil
 	self._esc_region_cache = nil
 	self._esc_dropdown = nil   -- widgets die with the view; just drop our ref
 	self._esc_dd_toggle = nil
-end)
+	self._esc_regions = nil    -- Party Finder's fetched region list (refetch fresh on reopen)
+	self._esc_regions_fetching = nil
+	self._esc_hidden = nil
+end
 
--- keep the label in sync, and drive the dropdown (deferred close + mouse-wheel scroll)
-mod:hook_safe("MissionBoardView", "update", function(self)
+-- Show/hide the whole stepper (used when the view enters a mode our overlay must not cover, e.g. PF's
+-- SHIFT "Show Details" preview). Only touches things on transition; closes the dropdown when hiding.
+local function set_stepper_hidden(view, hide)
+	if not view._esc_widgets or hide == view._esc_hidden then
+		return
+	end
+	view._esc_hidden = hide
+	local w = view._esc_widgets
+	if w.prev  then w.prev.visible  = not hide; w.prev.dirty  = true end
+	if w.label then w.label.visible = not hide; w.label.dirty = true end
+	if w.next  then w.next.visible  = not hide; w.next.dirty  = true end
+	if hide then
+		close_dropdown(view)   -- safe here: on_view_update runs before draw()
+	end
+end
+
+-- keep the label in sync, and drive the dropdown (deferred close + mouse-wheel scroll).
+-- `input_service` is the one the view's update() is called with (mission_board_view.lua:1166,
+-- havoc_play_view.lua:759). We use the PASSED service rather than self._stored_input_service so
+-- this works on Havoc too — HavocPlayView never stores _stored_input_service, but every view's
+-- update receives the live input service as its 4th arg (base_view.lua:476).
+local function on_view_update(self, input_service)
+	-- hide the stepper (+ dropdown) while the view is in a mode our overlay must not cover (per-view;
+	-- e.g. Party Finder's SHIFT party-details preview). While hidden, skip label sync + dropdown input.
+	local adapter = adapter_for(self)
+	local hide = (adapter and adapter.hide_when and adapter.hide_when(self)) or false
+	set_stepper_hidden(self, hide)
+	if hide then
+		return
+	end
+
 	if self._esc_widgets then
 		refresh_label(self)
 	end
@@ -813,7 +997,7 @@ mod:hook_safe("MissionBoardView", "update", function(self)
 				end
 			end
 			if hovering then
-				local input = self._stored_input_service   -- set by the view every draw
+				local input = input_service or self._stored_input_service
 				-- scroll_axis comes back as a Vector3 (USERDATA), not a Lua table — every game
 				-- view reads scroll_axis[2] directly. A `type(axis) == "table"` guard here is
 				-- ALWAYS false and silently eats every scroll. Index [2] inside the pcall instead.
@@ -835,6 +1019,43 @@ mod:hook_safe("MissionBoardView", "update", function(self)
 			end
 		end
 	end
+end
+
+mod:hook_safe("MissionBoardView", "on_enter", on_view_enter)
+mod:hook_safe("MissionBoardView", "on_exit",  on_view_exit)
+mod:hook_safe("MissionBoardView", "update",   function(self, dt, t, input_service) on_view_update(self, input_service) end)
+
+mod:hook_safe("HavocPlayView", "on_enter", on_view_enter)
+mod:hook_safe("HavocPlayView", "on_exit",  on_view_exit)
+mod:hook_safe("HavocPlayView", "update",   function(self, dt, t, input_service) on_view_update(self, input_service) end)
+
+mod:hook_safe("GroupFinderView", "on_enter", on_view_enter)
+mod:hook_safe("GroupFinderView", "on_exit",  on_view_exit)
+mod:hook_safe("GroupFinderView", "update",   function(self, dt, t, input_service) on_view_update(self, input_service) end)
+
+-- Havoc: the dropdown overlaps PLAY and hotspots don't occlude, so a click on a dropdown row would
+-- ALSO fire Havoc's PLAY and instantly queue the mission. Swallow it while the dropdown is open.
+-- (No keep-board-open here: Havoc's PLAY closes the whole Havoc stack via an async on_back_pressed
+-- -> close_view("havoc_background_view"), which the synchronous suppression below can't catch — and
+-- the Havoc use case is "pick a region, then queue", not queue-hunting. See DEV_NOTES.)
+mod:hook("HavocPlayView", "_cb_on_mission_start", function(func, self, ...)
+	if self._esc_dropdown and self._esc_dropdown.open and not suppress_close_view then
+		dbg("Havoc PLAY suppressed: server dropdown open")
+		return
+	end
+	return func(self, ...)
+end)
+
+-- Party Finder: the dropdown opens over the "Start Group" (host) button, and hotspots don't
+-- occlude — so a dropdown-row click would ALSO fire Start Group and begin advertising. Swallow it
+-- while the dropdown is open. (Switching region in PF only sets the region for your NEXT Start Group;
+-- it does NOT yet re-advertise a live listing on the new server — that's the next iteration.)
+mod:hook("GroupFinderView", "_cb_on_start_group_button_pressed", function(func, self, ...)
+	if self._esc_dropdown and self._esc_dropdown.open and not suppress_close_view then
+		dbg("Party Finder Start Group suppressed: server dropdown open")
+		return
+	end
+	return func(self, ...)
 end)
 
 -- keep the board open after PLAY so the stepper stays reachable while queued
@@ -852,7 +1073,7 @@ mod:hook("MissionBoardView", "_callback_start_selected_mission", function(func, 
 		return func(self, ...)
 	end
 
-	suppress_close_view = self.view_name or VIEW_NAME
+	suppress_close_view = self.view_name
 	local ok, err = pcall(func, self, ...)
 	suppress_close_view = nil
 
@@ -869,10 +1090,9 @@ mod:hook("UIManager", "close_view", function(func, self, view_name, ...)
 	return func(self, view_name, ...)
 end)
 
--- optional hotkeys (only act while the board is open)
+-- optional hotkeys (only act while a supported menu — mission board or Havoc — is open)
 local function view_or_warn()
-	local ui = Managers.ui
-	local view = ui and ui.view_instance and ui:view_instance(VIEW_NAME)
+	local view = active_supported_view()
 	if not view then
 		notify(mod:localize("open_board_first"))
 	end
@@ -900,8 +1120,7 @@ mod.on_setting_changed = function(setting_id)
 		return
 	end
 
-	local ui = Managers.ui
-	local view = ui and ui.view_instance and ui:view_instance(VIEW_NAME)
+	local view = active_supported_view()
 	if not view then
 		return
 	end
